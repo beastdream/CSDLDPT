@@ -1,4 +1,4 @@
-"""Configuration module for descriptors, color spaces, and normalization options."""
+"""Configuration module for descriptors, color spaces, metrics, and normalization options."""
 
 from typing import Final, Literal
 
@@ -6,6 +6,7 @@ ColorSpace: type = Literal["RGB", "HSV", "LAB"]
 DescriptorType: type = Literal[
     "rgb", "hsv", "lab", "rgb_hsv", "rgb_lab", "hsv_lab", "rgb_hsv_lab"
 ]
+MetricType: type = Literal["euclidean", "manhattan", "cosine"]
 NormalizationType: type = Literal["none", "zscore"]
 
 SUPPORTED_COLOR_SPACES: Final[tuple[str, ...]] = ("RGB", "HSV", "LAB")
@@ -21,8 +22,11 @@ DESCRIPTOR_DIMENSIONS: Final[dict[str, int]] = {
 }
 
 SUPPORTED_DESCRIPTORS: Final[tuple[str, ...]] = tuple(DESCRIPTOR_DIMENSIONS.keys())
+SUPPORTED_METRICS: Final[tuple[str, ...]] = ("euclidean", "manhattan", "cosine")
+SUPPORTED_NORMALIZATIONS: Final[tuple[str, ...]] = ("none", "zscore")
 
 DEFAULT_DESCRIPTOR: Final[str] = "rgb"
+DEFAULT_METRIC: Final[str] = "euclidean"
 DEFAULT_NORMALIZATION: Final[str] = "none"
 
 
@@ -66,3 +70,39 @@ def get_descriptor_dimension(descriptor: str) -> int:
     """Return the expected feature vector dimension for a descriptor."""
     validated = validate_descriptor(descriptor)
     return DESCRIPTOR_DIMENSIONS[validated]
+
+
+def validate_metric(metric: str) -> str:
+    """Validate and return the lowercase string of a similarity metric.
+
+    Raises:
+        ValueError: If ``metric`` is not supported.
+    """
+    if not isinstance(metric, str):
+        raise ValueError(f"metric must be a string, got {type(metric).__name__}.")
+
+    metric_lower = metric.strip().lower()
+    if metric_lower not in SUPPORTED_METRICS:
+        raise ValueError(
+            f"Unsupported similarity metric '{metric}'. "
+            f"Supported metrics: {', '.join(SUPPORTED_METRICS)}."
+        )
+    return metric_lower
+
+
+def validate_normalization(normalization: str) -> str:
+    """Validate and return the lowercase string of a normalization option.
+
+    Raises:
+        ValueError: If ``normalization`` is not supported.
+    """
+    if not isinstance(normalization, str):
+        raise ValueError(f"normalization must be a string, got {type(normalization).__name__}.")
+
+    norm_lower = normalization.strip().lower()
+    if norm_lower not in SUPPORTED_NORMALIZATIONS:
+        raise ValueError(
+            f"Unsupported normalization '{normalization}'. "
+            f"Supported normalization options: {', '.join(SUPPORTED_NORMALIZATIONS)}."
+        )
+    return norm_lower
