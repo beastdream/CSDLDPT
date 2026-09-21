@@ -1,32 +1,21 @@
-"""Smoke-test global RGB Color Moments on a few processed WANG images."""
+"""Smoke-test multi color space and fusion descriptors on processed WANG images."""
 
 from pathlib import Path
 import sys
 
 import numpy as np
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.color_moments import extract_color_moments
+from src.color_moments import extract_color_moments, extract_descriptor
+from src.config import DESCRIPTOR_DIMENSIONS
 
 
 DATASET_DIR = PROJECT_ROOT / "data" / "processed" / "wang"
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 PREFERRED_CATEGORIES = ("africa", "beach", "dinosaurs", "flowers", "food")
-FEATURE_NAMES = (
-    "R_mean",
-    "R_std",
-    "R_skew",
-    "G_mean",
-    "G_std",
-    "G_skew",
-    "B_mean",
-    "B_std",
-    "B_skew",
-)
 
 
 def first_image(category_dir: Path) -> Path | None:
@@ -68,47 +57,22 @@ def select_test_images(minimum: int = 5) -> list[tuple[str, Path]]:
     return selected
 
 
-def assert_valid_vector(vector: np.ndarray, image_path: Path) -> None:
-    """Assert all required invariants for one Color Moments vector."""
+def assert_valid_descriptor(
+    vector: np.ndarray, descriptor: str, image_path: Path
+) -> None:
+    """Assert invariants for a Color Moments descriptor vector."""
+    expected_dim = DESCRIPTOR_DIMENSIONS[descriptor]
     image_label = image_path.relative_to(PROJECT_ROOT).as_posix()
-    assert vector.shape == (9,), (
-        f"{image_label}: expected vector shape (9,), got {vector.shape}."
+    assert vector.shape == (expected_dim,), (
+        f"{image_label} ({descriptor}): expected shape ({expected_dim},), got {vector.shape}."
     )
     assert np.all(np.isfinite(vector)), (
-        f"{image_label}: feature vector contains NaN or Inf."
+        f"{image_label} ({descriptor}): vector contains NaN or Inf."
     )
-
-    for index, channel in zip((0, 3, 6), ("R", "G", "B")):
-        assert 0 <= vector[index] <= 255, (
-            f"{image_label}: {channel}_mean must be in [0, 255], "
-            f"got {vector[index]}."
-        )
-
-    for index, channel in zip((1, 4, 7), ("R", "G", "B")):
-        assert vector[index] >= 0, (
-            f"{image_label}: {channel}_std must be >= 0, got {vector[index]}."
-        )
-
-
-def print_result(category: str, image_path: Path, vector: np.ndarray) -> None:
-    """Print one test result without modifying the original feature values."""
-    image_label = image_path.relative_to(PROJECT_ROOT).as_posix()
-    print("=" * 50)
-    print(f"Image: {image_label}")
-    print(f"Category: {category}\n")
-    print(f"Feature vector shape: {vector.shape}\n")
-
-    for index, (name, value) in enumerate(zip(FEATURE_NAMES, vector)):
-        print(f"{name:<7} : {value:.4f}")
-        if index in (2, 5):
-            print()
-
-    formatted_vector = ", ".join(f"{value:.4f}" for value in vector)
-    print(f"\nVector: [{formatted_vector}]")
 
 
 def main() -> int:
-    """Run Color Moments assertions on five images from distinct categories."""
+    """Run multi color space assertions on five images from distinct categories."""
     if not DATASET_DIR.is_dir():
         print(
             "Processed WANG dataset not found. "
@@ -124,17 +88,37 @@ def main() -> int:
         )
         return 1
 
-    for category, image_path in selected_images:
-        try:
-            vector = extract_color_moments(image_path)
-            assert_valid_vector(vector, image_path)
-            print_result(category, image_path, vector)
-        except Exception as exc:
-            image_label = image_path.relative_to(PROJECT_ROOT).as_posix()
-            print(f"ERROR: Image {image_label} failed: {exc}")
-            return 1
+    print("=" * 60)
+    print("MULTI COLOR SPACE & FEATURE FUSION SMOKE TEST")
+    print("=" * 60)
 
-    print("\nAll Color Moments tests passed.")
+    # 1. Single color space extraction test
+    for category, image_path in selected_images:
+        for cs in ("RGB", "HSV", "LAB"):
+            try:
+                vec = extract_color_moments(image_path, color_space=cs)
+                assert vec.shape == (9,)
+                assert np.all(np.isfinite(vec))
+            except Exception as exc:
+                image_label = image_path.relative_to(PROJECT_ROOT).as_posix()
+                print(f"ERROR: Image {image_label} color_space={cs} failed: {exc}")
+                return 1
+
+    print("Single color space extractions (RGB, HSV, LAB 9D): PASS")
+
+    # 2. Descriptor fusion extractions test
+    for desc, expected_dim in DESCRIPTOR_DIMENSIONS.items():
+        for category, image_path in selected_images:
+            try:
+                vec = extract_descriptor(image_path, descriptor=desc)
+                assert_valid_descriptor(vec, desc, image_path)
+            except Exception as exc:
+                image_label = image_path.relative_to(PROJECT_ROOT).as_posix()
+                print(f"ERROR: Image {image_label} descriptor={desc} failed: {exc}")
+                return 1
+        print(f"Descriptor '{desc}' ({expected_dim}D): PASS")
+
+    print("\nAll Multi Color Space & Fusion tests passed successfully.")
     return 0
 
 
