@@ -20,12 +20,20 @@ QUERY_PATH = OUTPUT_DIR / "query_metrics.csv"
 CATEGORY_PATH = OUTPUT_DIR / "category_metrics.csv"
 OVERALL_PATH = OUTPUT_DIR / "overall_metrics.csv"
 KS = (5, 10, 20)
-METRIC_COLUMNS = tuple(
-    [f"precision_at_{k}" for k in KS] + [f"recall_at_{k}" for k in KS]
+AT_K_COLUMNS = tuple(
+    [f"precision_at_{k}" for k in KS]
+    + [f"recall_at_{k}" for k in KS]
+    + [f"f1_at_{k}" for k in KS]
 )
-QUERY_COLUMNS = ("query_id", "filename", "category", *METRIC_COLUMNS)
+# Per query the AP column is average_precision; aggregated it is reported as map.
+QUERY_METRIC_COLUMNS = (*AT_K_COLUMNS, "average_precision")
+METRIC_COLUMNS = (*AT_K_COLUMNS, "map")
+QUERY_COLUMNS = ("query_id", "filename", "category", *QUERY_METRIC_COLUMNS)
 CATEGORY_COLUMNS = ("category", "num_queries", *METRIC_COLUMNS)
-OVERALL_COLUMNS = ("num_queries", "num_categories", *METRIC_COLUMNS)
+OVERALL_COLUMNS = {
+    "method", "feature_dim", "distance_metric", "normalization",
+    "num_queries", "num_categories", *METRIC_COLUMNS,
+}
 CHECK_NAMES = (
     "Repository images",
     "Repository categories",
@@ -37,15 +45,16 @@ CHECK_NAMES = (
     "Queries per category",
     "Metric ranges",
     "Precision/Recall relation",
+    "F1 relation",
     "Category aggregation",
     "Overall aggregation",
     "Evaluation totals",
 )
 
 
-def _metric_frame_is_valid(frame: pd.DataFrame) -> bool:
+def _metric_frame_is_valid(frame: pd.DataFrame, columns: tuple[str, ...]) -> bool:
     """Return whether every metric value is finite and lies in [0, 1]."""
-    values = frame.loc[:, METRIC_COLUMNS].to_numpy(dtype=np.float64)
+    values = frame.loc[:, columns].to_numpy(dtype=np.float64)
     return bool(np.all(np.isfinite(values)) and np.all((values >= 0) & (values <= 1)))
 
 
@@ -78,7 +87,7 @@ def main() -> int:
             raise ValueError("query_metrics.csv has an invalid schema.")
         if tuple(category.columns) != CATEGORY_COLUMNS:
             raise ValueError("category_metrics.csv has an invalid schema.")
-        if tuple(overall.columns) != OVERALL_COLUMNS:
+        if set(overall.columns) != OVERALL_COLUMNS:
             raise ValueError("overall_metrics.csv has an invalid schema.")
 
         checks["Query metric rows"] = len(query) == 1000
@@ -92,9 +101,9 @@ def main() -> int:
             and all(count == 100 for count in query_counts.values())
         )
         checks["Metric ranges"] = (
-            _metric_frame_is_valid(query)
-            and _metric_frame_is_valid(category)
-            and _metric_frame_is_valid(overall)
+            _metric_frame_is_valid(query, QUERY_METRIC_COLUMNS)
+            and _metric_frame_is_valid(category, METRIC_COLUMNS)
+            and _metric_frame_is_valid(overall, METRIC_COLUMNS)
         )
 
         relation_ok = True
@@ -105,6 +114,16 @@ def main() -> int:
             )
         checks["Precision/Recall relation"] = relation_ok
 
+        f1_ok = True
+        for k in KS:
+            precision = query[f"precision_at_{k}"]
+            recall = query[f"recall_at_{k}"]
+            denominator = (precision + recall).replace(0, np.nan)
+            expected_f1 = (2 * precision * recall / denominator).fillna(0.0)
+            f1_ok &= bool(np.allclose(query[f"f1_at_{k}"], expected_f1, atol=1e-12))
+        checks["F1 relation"] = f1_ok
+
+        query = query.rename(columns={"average_precision": "map"})
         expected_category = (
             query.groupby("category", as_index=False, sort=True)
             .agg(

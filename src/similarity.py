@@ -1,4 +1,8 @@
-"""Vector validation and distance metrics (Euclidean, Manhattan, Cosine)."""
+"""Vector validation and distance metrics (Euclidean, Manhattan, Cosine).
+
+A single color space gives a 9D vector; concatenated color spaces give 18D or
+27D vectors.
+"""
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -6,16 +10,20 @@ from numpy.typing import ArrayLike, NDArray
 from src.config import validate_metric
 
 FEATURE_DIMENSION = 9
+DISTANCE_METRICS = ("euclidean", "manhattan", "cosine")
 
 
 def validate_feature_vector(
-    vector: ArrayLike, expected_dim: int | None = None
+    vector: ArrayLike,
+    expected_dim: int | None = None,
+    dimension: int | None = None,
 ) -> NDArray[np.float64]:
     """Convert a feature vector to a 1D finite float64 array.
 
     Args:
         vector: Input array-like vector.
         expected_dim: Expected feature vector length. If None, any non-empty 1D shape is accepted.
+        dimension: Alias of ``expected_dim``.
 
     Raises:
         ValueError: If vector is invalid, non-1D, empty, contains NaN/Inf, or has incorrect dimension.
@@ -30,6 +38,8 @@ def validate_feature_vector(
             f"Feature vector must be a non-empty 1D array; received shape {validated.shape}."
         )
 
+    if expected_dim is None:
+        expected_dim = dimension
     if expected_dim is not None and validated.shape != (expected_dim,):
         raise ValueError(
             f"Feature vector shape mismatch: expected ({expected_dim},), received {validated.shape}."
@@ -39,6 +49,32 @@ def validate_feature_vector(
         raise ValueError("Feature vector contains NaN or infinite values.")
 
     return validated
+
+
+def validate_feature_matrix(
+    database_matrix: ArrayLike,
+    dimension: int,
+) -> NDArray[np.float64]:
+    """Convert a database matrix to finite float64 with shape ``(N, dimension)``."""
+    try:
+        matrix = np.asarray(database_matrix, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Database matrix must contain numeric values.") from exc
+
+    if matrix.ndim != 2:
+        raise ValueError(
+            f"Database matrix must be a 2D array (N x D); received shape {matrix.shape}."
+        )
+    if matrix.shape[0] == 0:
+        raise ValueError("Database matrix must contain at least one feature vector.")
+    if matrix.shape[1] != dimension:
+        raise ValueError(
+            f"Feature dimension mismatch: query vector is {dimension}D, "
+            f"database matrix is {matrix.shape[1]}D."
+        )
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError("Database matrix contains NaN or infinite values.")
+    return matrix
 
 
 def calculate_distance(
@@ -84,24 +120,7 @@ def calculate_distances(
     metric_clean = validate_metric(metric)
     query = validate_feature_vector(query_vector)
 
-    try:
-        matrix = np.asarray(database_matrix, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Database matrix must contain numeric values.") from exc
-
-    if matrix.ndim != 2:
-        raise ValueError(
-            f"Database matrix must be a 2D array (N x D); received shape {matrix.shape}."
-        )
-    if matrix.shape[0] == 0:
-        raise ValueError("Database matrix must contain at least one feature vector.")
-    if matrix.shape[1] != query.shape[0]:
-        raise ValueError(
-            f"Feature dimension mismatch: query vector is {query.shape[0]}D, "
-            f"database matrix is {matrix.shape[1]}D."
-        )
-    if not np.all(np.isfinite(matrix)):
-        raise ValueError("Database matrix contains NaN or infinite values.")
+    matrix = validate_feature_matrix(database_matrix, query.shape[0])
 
     if metric_clean == "euclidean":
         distances = np.sqrt(np.sum((matrix - query) ** 2, axis=1))
@@ -140,3 +159,7 @@ def euclidean_distances(
 ) -> NDArray[np.float64]:
     """Vectorized Euclidean distances for N x 9 matrix (maintained for baseline compatibility)."""
     return calculate_distances(query_vector, database_matrix, metric="euclidean")
+
+
+# Alias used by the experiment runner (src/experiment.py).
+compute_distances = calculate_distances

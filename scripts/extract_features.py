@@ -1,5 +1,12 @@
-"""Extract global RGB Color Moments from the processed WANG dataset."""
+"""Extract global Color Moments (RGB, HSV or LAB) from the processed WANG dataset.
 
+Usage:
+    python scripts/extract_features.py                    # RGB (baseline)
+    python scripts/extract_features.py --color-space HSV
+    python scripts/extract_features.py --color-space ALL  # RGB, HSV and LAB
+"""
+
+import argparse
 from collections import Counter
 import csv
 from pathlib import Path
@@ -12,11 +19,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.color_moments import extract_color_moments
+from src.color_moments import COLOR_SPACE_CHANNELS, extract_color_moments, feature_names
 
 
 DATASET_DIR = PROJECT_ROOT / "data" / "processed" / "wang"
-OUTPUT_PATH = PROJECT_ROOT / "data" / "features" / "color_moments_rgb.csv"
+FEATURES_DIR = PROJECT_ROOT / "data" / "features"
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 EXPECTED_TOTAL = 1000
 EXPECTED_PER_CATEGORY = 100
@@ -32,24 +39,12 @@ CATEGORIES = (
     "mountains",
     "food",
 )
-FEATURE_COLUMNS = (
-    "r_mean",
-    "r_std",
-    "r_skew",
-    "g_mean",
-    "g_std",
-    "g_skew",
-    "b_mean",
-    "b_std",
-    "b_skew",
-)
-CSV_COLUMNS = (
-    "image_id",
-    "filename",
-    "filepath",
-    "category",
-    *FEATURE_COLUMNS,
-)
+METADATA_COLUMNS = ("image_id", "filename", "filepath", "category")
+
+
+def output_path(color_space: str) -> Path:
+    """Return the feature CSV path for one color space."""
+    return FEATURES_DIR / f"color_moments_{color_space.lower()}.csv"
 
 
 def filename_sort_key(path: Path) -> tuple[int, int | str, str]:
@@ -96,17 +91,20 @@ def image_id_from_filename(path: Path) -> int | str:
 
 def extract_rows(
     images: list[tuple[str, Path]],
+    color_space: str,
 ) -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
     """Extract one validated 9D vector per image while collecting failures."""
+    columns = feature_names(color_space)
     rows: list[dict[str, object]] = []
     failed: list[tuple[str, str]] = []
     total = len(images)
 
     for index, (category, image_path) in enumerate(images, start=1):
         filepath = relative_path(image_path)
-        print(f"Processing [{index}/{total}]: {filepath}")
+        if index == 1 or index % 100 == 0:
+            print(f"Processing {color_space} [{index}/{total}]: {filepath}")
         try:
-            vector = extract_color_moments(image_path)
+            vector = extract_color_moments(image_path, color_space)
             if vector.shape != (9,):
                 raise ValueError(f"Expected feature shape (9,), got {vector.shape}.")
             if not np.all(np.isfinite(vector)):
@@ -118,7 +116,7 @@ def extract_rows(
                 "filepath": filepath,
                 "category": category,
             }
-            row.update(zip(FEATURE_COLUMNS, (float(value) for value in vector)))
+            row.update(zip(columns, (float(value) for value in vector)))
             rows.append(row)
         except Exception as exc:
             error = str(exc)
@@ -128,23 +126,27 @@ def extract_rows(
     return rows, failed
 
 
-def write_csv(rows: list[dict[str, object]]) -> None:
+def write_csv(rows: list[dict[str, object]], color_space: str) -> None:
     """Write extracted rows with the exact required 13-column schema."""
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_PATH.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=CSV_COLUMNS)
+    path = output_path(color_space)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(
+            csv_file, fieldnames=(*METADATA_COLUMNS, *feature_names(color_space))
+        )
         writer.writeheader()
         writer.writerows(rows)
 
 
-def validate_csv() -> tuple[bool, Counter[str], list[str]]:
+def validate_csv(color_space: str) -> tuple[bool, Counter[str], list[str]]:
     """Validate the saved CSV schema, counts, values, and filepath uniqueness."""
     errors: list[str] = []
     category_counts: Counter[str] = Counter()
+    feature_columns = feature_names(color_space)
 
-    with OUTPUT_PATH.open("r", newline="", encoding="utf-8") as csv_file:
+    with output_path(color_space).open("r", newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
-        if tuple(reader.fieldnames or ()) != CSV_COLUMNS:
+        if tuple(reader.fieldnames or ()) != (*METADATA_COLUMNS, *feature_columns):
             errors.append(
                 f"CSV columns do not match the required 13-column schema: "
                 f"{reader.fieldnames}."
@@ -161,7 +163,7 @@ def validate_csv() -> tuple[bool, Counter[str], list[str]]:
     for row_number, row in enumerate(rows, start=2):
         category = row.get("category", "")
         category_counts[category] += 1
-        for column in FEATURE_COLUMNS:
+        for column in feature_columns:
             try:
                 value = float(row.get(column, ""))
             except (TypeError, ValueError):
@@ -188,37 +190,51 @@ def print_summary(
     successful: int,
     failed: list[tuple[str, str]],
     category_counts: Counter[str],
+    color_space: str,
 ) -> None:
     """Print the required extraction summary."""
     print("\n" + "=" * 40)
-    print("RGB COLOR MOMENTS EXTRACTION SUMMARY\n")
+    print(f"{color_space} COLOR MOMENTS EXTRACTION SUMMARY\n")
     print("Dataset           : WANG/Corel-1K")
     print(f"Total expected    : {EXPECTED_TOTAL}")
     print(f"Successful        : {successful}")
     print(f"Failed            : {len(failed)}")
     print("Feature dimension : 9")
-    print("Color space       : RGB")
-    print(f"Output            : {relative_path(OUTPUT_PATH)}")
+    print(f"Color space       : {color_space}")
+    print(f"Output            : {relative_path(output_path(color_space))}")
     print("\nImages by category:")
     for category in CATEGORIES:
         print(f"{category:<12} : {category_counts[category]}")
-    print(
-        "\nFeature order: R_mean, R_std, R_skew, G_mean, G_std, G_skew, "
-        "B_mean, B_std, B_skew"
-    )
+    print(f"\nFeature order: {', '.join(feature_names(color_space))}")
 
 
 def main() -> int:
-    """Extract, save, and validate raw RGB Color Moments for WANG/Corel-1K."""
+    """Extract, save, and validate Color Moments for the requested color spaces."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--color-space",
+        default="RGB",
+        type=str.upper,
+        choices=(*COLOR_SPACE_CHANNELS, "ALL"),
+        help="Color space to extract (default: RGB).",
+    )
+    args = parser.parse_args()
+
     if not DATASET_DIR.is_dir():
         print(f"ERROR: Processed WANG dataset not found: {relative_path(DATASET_DIR)}")
         return 1
 
     images = discover_images()
-    rows, failed = extract_rows(images)
-    write_csv(rows)
-    csv_valid, category_counts, validation_errors = validate_csv()
-    print_summary(len(rows), failed, category_counts)
+    spaces = COLOR_SPACE_CHANNELS if args.color_space == "ALL" else (args.color_space,)
+    return max(extract_color_space(images, space) for space in spaces)
+
+
+def extract_color_space(images: list[tuple[str, Path]], color_space: str) -> int:
+    """Extract, save, and validate one color space; return a process exit code."""
+    rows, failed = extract_rows(images, color_space)
+    write_csv(rows, color_space)
+    csv_valid, category_counts, validation_errors = validate_csv(color_space)
+    print_summary(len(rows), failed, category_counts, color_space)
 
     if len(rows) != EXPECTED_TOTAL:
         print(
@@ -244,10 +260,10 @@ def main() -> int:
         and csv_valid
     )
     if extraction_valid:
-        print("\nRGB Color Moments extraction completed successfully.")
+        print(f"\n{color_space} Color Moments extraction completed successfully.")
         return 0
 
-    print("\nRGB Color Moments extraction did not pass validation.")
+    print(f"\n{color_space} Color Moments extraction did not pass validation.")
     return 1
 
 

@@ -1,5 +1,11 @@
-"""Import precomputed RGB/global Color Moments from CSV into MySQL."""
+"""Import precomputed global Color Moments (RGB/HSV/LAB) from CSV into MySQL.
 
+Usage:
+    python scripts/import_features_mysql.py                    # RGB
+    python scripts/import_features_mysql.py --color-space ALL  # RGB, HSV, LAB
+"""
+
+import argparse
 from collections import Counter
 import csv
 import math
@@ -15,22 +21,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.color_moments import COLOR_SPACE_CHANNELS, feature_names
 from src.database import connection_scope
+from src.repository import feature_csv_path
 
 
-CSV_PATH = PROJECT_ROOT / "data" / "features" / "color_moments_rgb.csv"
 EXPECTED_TOTAL = 1000
 EXPECTED_PER_CATEGORY = 100
-COLOR_SPACE = "RGB"
 FEATURE_TYPE = "GLOBAL"
-FEATURE_COLUMNS = (
-    "r_mean", "r_std", "r_skew",
-    "g_mean", "g_std", "g_skew",
-    "b_mean", "b_std", "b_skew",
-)
-REQUIRED_COLUMNS = (
-    "image_id", "filename", "filepath", "category", *FEATURE_COLUMNS
-)
+METADATA_COLUMNS = ("image_id", "filename", "filepath", "category")
 
 IMAGE_UPSERT = """
 INSERT INTO images (
@@ -46,38 +45,42 @@ ON DUPLICATE KEY UPDATE
     file_extension = VALUES(file_extension)
 """
 
+# CSV channel columns (e.g. h_mean) map by position to generic DB columns c1..c3.
 FEATURE_UPSERT = """
 INSERT INTO color_moment_features (
     image_id, color_space, feature_type,
-    r_mean, r_std, r_skew,
-    g_mean, g_std, g_skew,
-    b_mean, b_std, b_skew
+    c1_mean, c1_std, c1_skew,
+    c2_mean, c2_std, c2_skew,
+    c3_mean, c3_std, c3_skew
 )
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE
-    r_mean = VALUES(r_mean),
-    r_std = VALUES(r_std),
-    r_skew = VALUES(r_skew),
-    g_mean = VALUES(g_mean),
-    g_std = VALUES(g_std),
-    g_skew = VALUES(g_skew),
-    b_mean = VALUES(b_mean),
-    b_std = VALUES(b_std),
-    b_skew = VALUES(b_skew)
+    c1_mean = VALUES(c1_mean),
+    c1_std = VALUES(c1_std),
+    c1_skew = VALUES(c1_skew),
+    c2_mean = VALUES(c2_mean),
+    c2_std = VALUES(c2_std),
+    c2_skew = VALUES(c2_skew),
+    c3_mean = VALUES(c3_mean),
+    c3_std = VALUES(c3_std),
+    c3_skew = VALUES(c3_skew)
 """
 
 
-def load_csv_rows() -> list[dict[str, str]]:
+def load_csv_rows(color_space: str) -> list[dict[str, str]]:
     """Load and validate the precomputed feature CSV without recomputation."""
-    if not CSV_PATH.is_file():
-        raise FileNotFoundError(f"Feature CSV not found: {CSV_PATH}")
+    csv_path = feature_csv_path(color_space)
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Feature CSV not found: {csv_path}")
 
-    with CSV_PATH.open("r", newline="", encoding="utf-8") as csv_file:
+    feature_columns = feature_names(color_space)
+    required_columns = (*METADATA_COLUMNS, *feature_columns)
+    with csv_path.open("r", newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
-        if tuple(reader.fieldnames or ()) != REQUIRED_COLUMNS:
+        if tuple(reader.fieldnames or ()) != required_columns:
             raise ValueError(
                 "CSV must contain exactly these columns in order: "
-                + ", ".join(REQUIRED_COLUMNS)
+                + ", ".join(required_columns)
             )
         rows = list(reader)
 
@@ -93,7 +96,7 @@ def load_csv_rows() -> list[dict[str, str]]:
             int(row["image_id"])
         except ValueError as exc:
             raise ValueError(f"CSV row {row_number} has a non-numeric image_id.") from exc
-        for column in FEATURE_COLUMNS:
+        for column in feature_columns:
             try:
                 value = float(row[column])
             except ValueError as exc:
@@ -130,7 +133,10 @@ def fetch_categories(cursor: Any) -> dict[str, int]:
     return {name: category_id for category_id, name in cursor.fetchall()}
 
 
-def validate_database(cursor: Any) -> tuple[bool, int, int, Counter[str], list[str]]:
+def validate_database(
+    cursor: Any,
+    color_space: str,
+) -> tuple[bool, int, int, Counter[str], list[str]]:
     """Validate imported totals, duplicate paths, and per-category counts."""
     warnings: list[str] = []
     cursor.execute("SELECT COUNT(*) FROM images")
@@ -138,7 +144,7 @@ def validate_database(cursor: Any) -> tuple[bool, int, int, Counter[str], list[s
     cursor.execute(
         "SELECT COUNT(*) FROM color_moment_features "
         "WHERE color_space = %s AND feature_type = %s",
-        (COLOR_SPACE, FEATURE_TYPE),
+        (color_space, FEATURE_TYPE),
     )
     feature_count = cursor.fetchone()[0]
     cursor.execute(
@@ -155,7 +161,9 @@ def validate_database(cursor: Any) -> tuple[bool, int, int, Counter[str], list[s
     if image_count != EXPECTED_TOTAL:
         warnings.append(f"Expected 1000 images, found {image_count}.")
     if feature_count != EXPECTED_TOTAL:
-        warnings.append(f"Expected 1000 RGB/GLOBAL features, found {feature_count}.")
+        warnings.append(
+            f"Expected 1000 {color_space}/GLOBAL features, found {feature_count}."
+        )
     if duplicate_paths:
         warnings.append(f"Found {len(duplicate_paths)} duplicate filepath values.")
     for category, count in category_counts.items():
@@ -170,6 +178,7 @@ def print_summary(
     images: int,
     features: int,
     status: str,
+    color_space: str,
 ) -> None:
     """Print the required MySQL import summary."""
     print("\n" + "=" * 40)
@@ -178,7 +187,7 @@ def print_summary(
     print(f"Database       : {database}")
     print(f"Images         : {images}")
     print(f"Features       : {features}")
-    print(f"Color space    : {COLOR_SPACE}")
+    print(f"Color space    : {color_space}")
     print(f"Feature type   : {FEATURE_TYPE}")
     print("Feature dim    : 9")
     print(f"Status         : {status}")
@@ -186,9 +195,25 @@ def print_summary(
 
 
 def main() -> int:
-    """Import CSV rows atomically and validate the resulting database."""
+    """Import the requested color spaces, one atomic transaction each."""
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--color-space",
+        default="RGB",
+        type=str.upper,
+        choices=(*COLOR_SPACE_CHANNELS, "ALL"),
+        help="Color space to import (default: RGB).",
+    )
+    args = parser.parse_args()
+    spaces = COLOR_SPACE_CHANNELS if args.color_space == "ALL" else (args.color_space,)
+    return max(import_color_space(space) for space in spaces)
+
+
+def import_color_space(color_space: str) -> int:
+    """Import one color space's CSV rows atomically and validate the database."""
+    feature_columns = feature_names(color_space)
     try:
-        rows = load_csv_rows()
+        rows = load_csv_rows(color_space)
         csv_categories = {row["category"] for row in rows}
 
         with connection_scope() as connection:
@@ -206,7 +231,8 @@ def main() -> int:
                 connection.commit()
                 connection.start_transaction()
                 for index, row in enumerate(rows, start=1):
-                    print(f"Importing [{index}/{len(rows)}]: {row['filepath']}")
+                    if index == 1 or index % 100 == 0:
+                        print(f"Importing {color_space} [{index}/{len(rows)}]: {row['filepath']}")
                     width, height = read_image_size(row["filepath"])
                     extension = Path(row["filename"]).suffix.lower()
                     image_id = int(row["image_id"])
@@ -222,25 +248,30 @@ def main() -> int:
                             extension,
                         ),
                     )
-                    features = tuple(float(row[name]) for name in FEATURE_COLUMNS)
+                    features = tuple(float(row[name]) for name in feature_columns)
                     cursor.execute(
                         FEATURE_UPSERT,
-                        (image_id, COLOR_SPACE, FEATURE_TYPE, *features),
+                        (image_id, color_space, FEATURE_TYPE, *features),
                     )
 
-                valid, images, features, counts, warnings = validate_database(cursor)
+                valid, images, features, counts, warnings = validate_database(
+                    cursor, color_space
+                )
                 if not valid:
                     connection.rollback()
                     for warning in warnings:
                         print(f"WARNING: {warning}")
-                    print_summary(connection.database, images, features, "FAILED (ROLLED BACK)")
+                    print_summary(
+                        connection.database, images, features,
+                        "FAILED (ROLLED BACK)", color_space,
+                    )
                     return 1
 
                 connection.commit()
                 print("\nImages by category:")
                 for category in sorted(counts):
                     print(f"{category:<12} : {counts[category]}")
-                print_summary(connection.database, images, features, "SUCCESS")
+                print_summary(connection.database, images, features, "SUCCESS", color_space)
                 return 0
             except Exception:
                 if connection.in_transaction:
@@ -249,7 +280,7 @@ def main() -> int:
             finally:
                 cursor.close()
     except Exception as exc:
-        print(f"ERROR: MySQL feature import failed: {exc}")
+        print(f"ERROR: MySQL {color_space} feature import failed: {exc}")
         return 1
 
 

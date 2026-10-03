@@ -17,6 +17,33 @@ from src.config import (
 ImagePath: TypeAlias = str | PathLike[str]
 MomentVector: TypeAlias = NDArray[np.float64]
 
+# Channel names per supported color space, in feature order. RGB keeps the raw
+# 0-255 scale so the stored baseline stays unchanged. HSV and LAB use OpenCV's
+# float32 conversion: H in [0, 360), S/V in [0, 1], L in [0, 100], a/b ~[-127, 127].
+COLOR_SPACE_CHANNELS: dict[str, tuple[str, str, str]] = {
+    "RGB": ("r", "g", "b"),
+    "HSV": ("h", "s", "v"),
+    "LAB": ("l", "a", "b"),
+}
+MOMENT_NAMES = ("mean", "std", "skew")
+
+
+def normalize_color_space(color_space: str) -> str:
+    """Return the canonical upper-case color space name or raise ValueError."""
+    name = str(color_space).strip().upper()
+    if name not in COLOR_SPACE_CHANNELS:
+        raise ValueError(
+            f"Unsupported color space {color_space!r}; expected one of "
+            f"{', '.join(COLOR_SPACE_CHANNELS)}."
+        )
+    return name
+
+
+def feature_names(color_space: str) -> tuple[str, ...]:
+    """Return the 9 feature column names, e.g. ``h_mean, h_std, ..., v_skew``."""
+    channels = COLOR_SPACE_CHANNELS[normalize_color_space(color_space)]
+    return tuple(f"{channel}_{moment}" for channel in channels for moment in MOMENT_NAMES)
+
 
 def load_image_bgr(image_path: ImagePath) -> NDArray[np.uint8]:
     """Read an image using OpenCV and return it as a BGR NumPy array (H x W x 3).
@@ -45,8 +72,11 @@ def load_image_bgr(image_path: ImagePath) -> NDArray[np.uint8]:
 
 def convert_color_space(
     image_bgr: NDArray[np.generic], color_space: str = "RGB"
-) -> NDArray[np.uint8]:
+) -> NDArray[np.generic]:
     """Convert a 3-channel OpenCV BGR image into the specified color space (RGB, HSV, or LAB).
+
+    RGB stays uint8 (0-255). HSV and LAB use OpenCV's float32 conversion so the
+    values follow ``COLOR_SPACE_CHANNELS``' documented ranges.
 
     Raises:
         ValueError: If ``image_bgr`` is invalid or ``color_space`` is unsupported.
@@ -62,10 +92,11 @@ def convert_color_space(
 
     if cs_upper == "RGB":
         return cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+    image_float = image_array.astype(np.float32) / 255.0
     if cs_upper == "HSV":
-        return cv2.cvtColor(image_array, cv2.COLOR_BGR2HSV)
+        return cv2.cvtColor(image_float, cv2.COLOR_BGR2HSV)
     if cs_upper == "LAB":
-        return cv2.cvtColor(image_array, cv2.COLOR_BGR2LAB)
+        return cv2.cvtColor(image_float, cv2.COLOR_BGR2LAB)
 
     raise ValueError(f"Unsupported color space: {color_space}")
 
