@@ -1,4 +1,4 @@
-"""Compute global RGB Color Moments for a single image."""
+"""Compute global Color Moments for a single image in RGB, HSV, or LAB."""
 
 from os import PathLike
 from pathlib import Path
@@ -11,6 +11,43 @@ from numpy.typing import NDArray
 
 ImagePath: TypeAlias = str | PathLike[str]
 MomentVector: TypeAlias = NDArray[np.float64]
+
+# Channel names per supported color space, in feature order. RGB keeps the raw
+# 0-255 scale so the stored baseline stays unchanged. HSV and LAB use OpenCV's
+# float32 conversion: H in [0, 360), S/V in [0, 1], L in [0, 100], a/b ~[-127, 127].
+COLOR_SPACE_CHANNELS: dict[str, tuple[str, str, str]] = {
+    "RGB": ("r", "g", "b"),
+    "HSV": ("h", "s", "v"),
+    "LAB": ("l", "a", "b"),
+}
+MOMENT_NAMES = ("mean", "std", "skew")
+
+
+def normalize_color_space(color_space: str) -> str:
+    """Return the canonical upper-case color space name or raise ValueError."""
+    name = str(color_space).strip().upper()
+    if name not in COLOR_SPACE_CHANNELS:
+        raise ValueError(
+            f"Unsupported color space {color_space!r}; expected one of "
+            f"{', '.join(COLOR_SPACE_CHANNELS)}."
+        )
+    return name
+
+
+def feature_names(color_space: str) -> tuple[str, ...]:
+    """Return the 9 feature column names, e.g. ``h_mean, h_std, ..., v_skew``."""
+    channels = COLOR_SPACE_CHANNELS[normalize_color_space(color_space)]
+    return tuple(f"{channel}_{moment}" for channel in channels for moment in MOMENT_NAMES)
+
+
+def convert_color_space(image_rgb: NDArray[np.generic], color_space: str) -> NDArray[np.generic]:
+    """Convert an 8-bit RGB image to the requested color space."""
+    name = normalize_color_space(color_space)
+    if name == "RGB":
+        return image_rgb
+    image_float = np.asarray(image_rgb, dtype=np.float32) / 255.0
+    code = cv2.COLOR_RGB2HSV if name == "HSV" else cv2.COLOR_RGB2LAB
+    return cv2.cvtColor(image_float, code)
 
 
 def load_image_rgb(image_path: ImagePath) -> NDArray[np.uint8]:
@@ -69,12 +106,12 @@ def compute_channel_moments(channel: NDArray[np.generic]) -> tuple[float, float,
 
 
 def compute_color_moments(image_rgb: NDArray[np.generic]) -> MomentVector:
-    """Compute a global 9D Color Moments vector from an RGB image.
+    """Compute a global 9D Color Moments vector from a 3-channel image.
 
-    Feature order:
-        R_mean, R_std, R_skew,
-        G_mean, G_std, G_skew,
-        B_mean, B_std, B_skew.
+    Feature order (channels as given, e.g. RGB):
+        C1_mean, C1_std, C1_skew,
+        C2_mean, C2_std, C2_skew,
+        C3_mean, C3_std, C3_skew.
     """
     if image_rgb is None:
         raise ValueError("RGB image must not be None.")
@@ -105,6 +142,6 @@ def compute_color_moments(image_rgb: NDArray[np.generic]) -> MomentVector:
     return vector
 
 
-def extract_color_moments(image_path: ImagePath) -> MomentVector:
-    """Load an image as RGB and return its global 9D Color Moments vector."""
-    return compute_color_moments(load_image_rgb(image_path))
+def extract_color_moments(image_path: ImagePath, color_space: str = "RGB") -> MomentVector:
+    """Load an image and return its global 9D Color Moments in ``color_space``."""
+    return compute_color_moments(convert_color_space(load_image_rgb(image_path), color_space))
